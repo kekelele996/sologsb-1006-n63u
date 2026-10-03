@@ -1,6 +1,12 @@
 export type CueStatus = 'pending' | 'confirmed' | 'followup'
 export type TabId = 'live' | 'backstage' | 'terms' | 'offline'
 
+export interface Room {
+  id: string
+  name: string
+  kind: 'main' | 'breakout'
+}
+
 export interface Speaker {
   id: string
   name: string
@@ -15,7 +21,7 @@ export interface Session {
   time: string
   title: string
   speakerId: string
-  room: string
+  roomId: string
   status: 'upcoming' | 'live' | 'done'
 }
 
@@ -38,6 +44,8 @@ export interface Announcement {
 
 export interface Cue {
   id: string
+  roomId: string
+  sessionId: string
   speakerId: string
   text: string
   receivedAt: number
@@ -60,6 +68,8 @@ export interface Reminder {
 }
 
 export interface DeskState {
+  rooms: Room[]
+  activeRoomId: string
   speakers: Speaker[]
   sessions: Session[]
   terms: Term[]
