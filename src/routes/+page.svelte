@@ -3,9 +3,9 @@
   import Button from 'flowbite-svelte/Button.svelte'
   import {
     acknowledgeReminder, addAnnouncement, addSession, addSpeaker, addTerm, canRedo, canUndo, clearDuplicate,
-    deleteCue, desk, getDelay, ingestCue, moveCue, publishAnnouncement, redoDesk, sendReminder, setActiveCue,
-    setCueStatus, setFontScale, setLiveSimulation, setOnline, speakerName, termTarget, undoDesk, updateCue,
-    updateSession, updateSpeaker, updateTerm
+    deleteCue, desk, getDelay, ingestCue, moveCue, publishAnnouncement, redoDesk, retryTransfer, sendReminder,
+    setActiveCue, setCueStatus, setFontScale, setLiveSimulation, setOnline, speakerName, termTarget,
+    transferToVenue, undoDesk, updateCue, updateSession, updateSpeaker, updateTerm, venueName, venues
   } from '$lib/store'
   import type { Announcement, Cue, Session, TabId, Term } from '$lib/types'
 
@@ -30,15 +30,21 @@
   let simulationIndex = 0
   let showHelp = false
 
-  $: currentSession = $desk.sessions.find(item => item.status === 'live') || $desk.sessions[0]
-  $: activeCue = $desk.cues.find(item => item.id === $desk.activeCueId) || $desk.cues.at(-1)
-  $: pendingCount = $desk.cues.filter(item => item.status === 'pending').length
-  $: offlineCount = $desk.cues.filter(item => item.offline).length
-  $: lateCount = $desk.cues.filter(item => getDelay(item, now) > 8 && item.status !== 'confirmed').length
-  $: duplicateCount = $desk.cues.filter(item => item.duplicateOf).length
+  $: venueCues = $desk.cues.filter(item => item.venueId === $desk.currentVenueId)
+  $: stageCues = venueCues.filter(item => item.status === 'confirmed')
+  $: venueSessions = $desk.sessions.filter(item => item.venueId === $desk.currentVenueId)
+  $: currentSession = venueSessions.find(item => item.status === 'live') || venueSessions[0]
+  $: activeCue = venueCues.find(item => item.id === $desk.activeCueId) || venueCues.at(-1)
+  $: pendingCount = venueCues.filter(item => item.status === 'pending').length
+  $: offlineCount = venueCues.filter(item => item.offline).length
+  $: lateCount = venueCues.filter(item => getDelay(item, now) > 8 && item.status !== 'confirmed').length
+  $: duplicateCount = venueCues.filter(item => item.duplicateOf).length
   $: activeSpeaker = $desk.speakers.find(item => item.id === activeCue?.speakerId)
   $: activeTerms = $desk.terms.filter(item => item.speakerId === activeCue?.speakerId || activeCue?.tags.includes(item.target))
   $: unreadReminders = $desk.reminders.filter(item => !item.acknowledged)
+  $: venueWaiting = venues.map(venue => ({ venue, waiting: $desk.cues.filter(cue => cue.venueId === venue.id && cue.status !== 'confirmed').length }))
+  $: failedTransfers = $desk.transfers.filter(item => item.status === 'failed')
+  $: recentTransfers = $desk.transfers.slice(0, 6)
 
   onMount(() => {
     if (typeof navigator !== 'undefined') setOnline(navigator.onLine)
@@ -94,6 +100,25 @@
   function mergeOffline() {
     setOnline(true)
     flash('网络已恢复，离线内容已合并并完成重复检查。')
+  }
+  function handleTransfer(targetVenueId: string) {
+    const result = transferToVenue(targetVenueId)
+    if (!result.ok) {
+      flash('离线状态无法完成转场，已记录失败；恢复连接后可按原会场重试。')
+      return
+    }
+    if (result.moved || result.kept) flash(`已转场至${venueName(targetVenueId)}：${result.moved} 条未确认条目随行，${result.kept} 段已上屏内容留在原会场。`)
+    else flash(`已值守${venueName(targetVenueId)}。`)
+  }
+  function handleRetryTransfer(id: string) {
+    const result = retryTransfer(id)
+    if (result.ok) flash(`已按原会场重试转场，${result.moved} 条未确认条目完成迁移。`)
+    else flash('当前仍处离线，重试未完成，条目保留在原会场。')
+  }
+  function changeSessionVenue(session: Session, venueId: string) {
+    const moving = $desk.cues.filter(cue => cue.sessionId === session.id && cue.venueId === session.venueId && cue.status !== 'confirmed').length
+    updateSession(session.id, { venueId })
+    flash(moving ? `场次归属已调整，${moving} 条未确认条目跟到${venueName(venueId)}；已上屏段落留在原会场。` : '场次归属已更新。')
   }
   function sendTermReminder(termId: string) {
     if (!activeCue) return
@@ -155,6 +180,7 @@
         {/each}
       </nav>
       <div class="ml-auto flex flex-wrap items-center gap-2">
+        <span class="rounded-full border border-teal-500/40 bg-teal-500/15 px-3 py-1.5 text-[11px] font-bold text-teal-300">值守 · {venueName($desk.currentVenueId)}</span>
         <span class="rounded-full border px-3 py-1.5 text-[11px] font-bold {$desk.online ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300' : 'border-amber-500/40 bg-amber-500/15 text-amber-300'}">
           <span class="mr-2 inline-block h-2 w-2 rounded-full {$desk.online ? 'bg-emerald-400' : 'bg-amber-400'}"></span>{$desk.online ? '现场连接正常' : '离线 · 本地暂存'}
         </span>
@@ -174,9 +200,9 @@
     {#if tab === 'live'}
       <div class="mb-4 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p class="text-[10px] font-black uppercase tracking-[.18em] text-teal-700">当前场次 · {$desk.online ? 'LIVE' : 'OFFLINE MODE'}</p>
-          <h1 class="mt-1 text-2xl font-black tracking-tight lg:text-4xl">{currentSession?.title}</h1>
-          <p class="mt-2 text-sm text-slate-500">{currentSession?.time} · {currentSession?.room} · {$desk.speakers.find(item => item.id === currentSession?.speakerId)?.name}</p>
+          <p class="text-[10px] font-black uppercase tracking-[.18em] text-teal-700">{venueName($desk.currentVenueId)} · {$desk.online ? 'LIVE' : 'OFFLINE MODE'}</p>
+          <h1 class="mt-1 text-2xl font-black tracking-tight lg:text-4xl">{currentSession?.title || '当前会场暂无排期'}</h1>
+          {#if currentSession}<p class="mt-2 text-sm text-slate-500">{currentSession.time} · {venueName(currentSession.venueId)} · {$desk.speakers.find(item => item.id === currentSession?.speakerId)?.name}</p>{/if}
         </div>
         <div class="grid grid-cols-3 gap-2 text-center">
           <div class="rounded-xl border bg-white px-4 py-2"><strong class="block text-xl">{pendingCount}</strong><span class="text-[10px] text-slate-500">待传</span></div>
@@ -185,36 +211,65 @@
         </div>
       </div>
 
+      <section class="mb-4 rounded-2xl border bg-white p-4 shadow-sm" aria-label="译员转场">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <span class="text-[10px] font-black uppercase tracking-[.16em] text-slate-400">译员值守 · 各会场队列与上屏相互独立</span>
+            <h2 class="mt-1 text-sm font-bold">转场时未确认条目跟着走，已上屏段落留在原会场</h2>
+          </div>
+          <div class="flex gap-1 rounded-xl bg-slate-100 p-1" role="group" aria-label="选择值守会场">
+            {#each venueWaiting as row}
+              <button
+                class="focus-ring flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition disabled:cursor-default {row.venue.id === $desk.currentVenueId ? 'bg-ink text-white shadow' : 'text-slate-600 hover:bg-white'}"
+                aria-current={row.venue.id === $desk.currentVenueId ? 'true' : undefined}
+                disabled={row.venue.id === $desk.currentVenueId}
+                title={row.venue.id === $desk.currentVenueId ? '当前值守会场' : `转场至${row.venue.name}`}
+                on:click={() => handleTransfer(row.venue.id)}
+              >
+                {row.venue.name}
+                {#if row.waiting}<span class="rounded-full px-1.5 py-0.5 text-[10px] {row.venue.id === $desk.currentVenueId ? 'bg-orange-500 text-white' : 'bg-slate-300 text-slate-700'}">{row.waiting}</span>{/if}
+              </button>
+            {/each}
+          </div>
+        </div>
+        {#each failedTransfers as transfer}
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-900" role="alert">
+            <span><strong>转场失败：</strong>{venueName(transfer.fromVenueId)} → {venueName(transfer.toVenueId)}，未确认条目仍留在{venueName(transfer.fromVenueId)}。</span>
+            <button class="font-black underline" on:click={() => handleRetryTransfer(transfer.id)}>按原会场重试</button>
+          </div>
+        {/each}
+      </section>
+
       <div class="grid gap-4 xl:grid-cols-[minmax(0,1.65fr)_minmax(300px,.75fr)]">
         <div class="space-y-4">
           <section class="overflow-hidden rounded-2xl border border-teal-800 bg-[#0d3b36] text-white shadow-lg">
             <div class="flex items-center justify-between border-b border-white/10 px-4 py-3">
-              <div><span class="text-[10px] font-black uppercase tracking-[.16em] text-teal-200">现场可见内容</span><h2 class="mt-1 font-bold">舞台字幕与紧急通知</h2></div>
+              <div><span class="text-[10px] font-black uppercase tracking-[.16em] text-teal-200">现场可见内容 · {venueName($desk.currentVenueId)}</span><h2 class="mt-1 font-bold">舞台字幕与紧急通知</h2></div>
               <span class="rounded-full bg-teal-600 px-2.5 py-1 text-[10px] font-black text-white">STAGE OUTPUT</span>
             </div>
             <div class="space-y-3 p-4">
               {#each $desk.announcements.filter(item => item.visibleOnStage) as item}
                 <div class="rounded-xl border border-orange-300/30 bg-orange-500/15 p-3"><strong class="text-xs text-orange-200">紧急通知</strong><p class="mt-1 text-lg font-bold">{item.text}</p></div>
               {/each}
-              {#each $desk.cues.filter(item => item.status === 'confirmed').slice(-2) as cue}
+              {#each stageCues.slice(-2) as cue}
                 <div class="rounded-xl bg-white/10 p-3">
                   <div class="mb-1 flex justify-between text-[10px] text-teal-200"><span>{speakerName($desk, cue.speakerId)}</span><span>{formatTime(cue.receivedAt)}</span></div>
                   <p class="text-base leading-relaxed lg:text-lg">{cue.text}</p>
                 </div>
               {/each}
-              {#if !$desk.cues.some(item => item.status === 'confirmed') && !$desk.announcements.some(item => item.visibleOnStage)}
-                <p class="py-5 text-center text-sm text-teal-100/60">确认传译或发布通知后，现场可见内容将在这里出现。</p>
+              {#if !stageCues.length && !$desk.announcements.some(item => item.visibleOnStage)}
+                <p class="py-5 text-center text-sm text-teal-100/60">确认传译或发布通知后，{venueName($desk.currentVenueId)}的现场可见内容将在这里出现。</p>
               {/if}
             </div>
           </section>
 
           <section class="rounded-2xl border bg-white shadow-sm">
             <div class="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
-              <div><span class="text-[10px] font-black uppercase tracking-[.16em] text-slate-400">后台传译队列</span><h2 class="mt-1 font-bold">待确认与遗漏补充</h2></div>
+              <div><span class="text-[10px] font-black uppercase tracking-[.16em] text-slate-400">后台传译队列 · {venueName($desk.currentVenueId)}</span><h2 class="mt-1 font-bold">待确认与遗漏补充</h2></div>
               <div class="flex items-center gap-3 text-xs text-slate-500"><span>自动接入</span><button type="button" role="switch" aria-label="自动接入现场文字" aria-checked={$desk.liveSimulation} class="focus-ring h-6 w-11 rounded-full p-1 transition {$desk.liveSimulation ? 'bg-teal-600' : 'bg-slate-300'}" on:click={() => setLiveSimulation(!$desk.liveSimulation)}><span class="block h-4 w-4 rounded-full bg-white transition {$desk.liveSimulation ? 'translate-x-5' : ''}"></span></button></div>
             </div>
             <div class="max-h-[600px] space-y-2 overflow-y-auto p-3 scrollbar-thin">
-              {#each $desk.cues as cue, index}
+              {#each venueCues as cue, index}
                 <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
                 <article role="button" tabindex="0" class="cue-enter cursor-pointer rounded-xl border p-3 transition {cue.id === $desk.activeCueId ? 'border-teal-600 bg-teal-50 shadow-md' : 'border-slate-200 bg-white hover:border-slate-300'}" on:click={() => selectCue(cue)} on:keydown={event => (event.key === 'Enter' || event.key === ' ') && selectCue(cue)}>
                   <div class="flex flex-wrap items-start gap-3">
@@ -230,7 +285,7 @@
                       <p class="text-sm leading-6 lg:text-base">{cue.text}</p>
                       {#if cue.duplicateOf}
                         <div class="mt-2 flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
-                          <span><strong>疑似重复：</strong>与第 {$desk.cues.findIndex(item => item.id === cue.duplicateOf) + 1} 条高度相似</span>
+                          <span><strong>疑似重复：</strong>与第 {venueCues.findIndex(item => item.id === cue.duplicateOf) + 1} 条高度相似</span>
                           <button class="font-black underline" on:click|stopPropagation={() => clearDuplicate(cue.id)}>确认非重复</button>
                         </div>
                       {/if}
@@ -240,6 +295,7 @@
                   </div>
                 </article>
               {/each}
+              {#if !venueCues.length}<p class="py-8 text-center text-sm text-slate-400">{venueName($desk.currentVenueId)}暂无队列内容。</p>{/if}
             </div>
           </section>
         </div>
@@ -283,20 +339,34 @@
               {#if !$desk.reminders.length}<p class="py-4 text-center text-xs text-slate-400">尚未发送术语提醒。</p>{/if}
             </div>
           </section>
+
+          <section class="rounded-2xl border bg-white p-4 shadow-sm">
+            <div class="mb-3 flex items-center justify-between"><div><span class="text-[10px] font-black uppercase tracking-[.16em] text-slate-400">译员转场</span><h2 class="mt-1 font-bold">转场记录</h2></div><span class="text-xs text-slate-500">{failedTransfers.length} 条待重试</span></div>
+            <div class="max-h-52 space-y-2 overflow-y-auto">
+              {#each recentTransfers as transfer}
+                <div class="flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-xs {transfer.status === 'failed' ? 'bg-red-50 text-red-900' : 'bg-slate-50 text-slate-600'}">
+                  <span><strong>{venueName(transfer.fromVenueId)}</strong> → <strong>{venueName(transfer.toVenueId)}</strong> · {transfer.status === 'failed' ? '失败待重试' : `已迁移 ${transfer.movedCount} 条`} · {formatTime(transfer.createdAt)}</span>
+                  {#if transfer.status === 'failed'}<button class="font-bold underline" on:click={() => handleRetryTransfer(transfer.id)}>重试</button>{/if}
+                </div>
+              {/each}
+              {#if !$desk.transfers.length}<p class="py-4 text-center text-xs text-slate-400">尚未发生转场。</p>{/if}
+            </div>
+          </section>
         </div>
       </div>
     {/if}
 
     {#if tab === 'backstage'}
-      <div class="mb-5"><p class="text-[10px] font-black uppercase tracking-[.18em] text-teal-700">后台准备内容 · 不会直接显示给现场</p><h1 class="mt-1 text-3xl font-black">议程、发言人与紧急通知</h1></div>
+      <div class="mb-5"><p class="text-[10px] font-black uppercase tracking-[.18em] text-teal-700">主控台 · 仅维护议程与人员，不直接改动各会场队列</p><h1 class="mt-1 text-3xl font-black">议程、发言人与紧急通知</h1></div>
       <div class="grid gap-4 xl:grid-cols-[1.3fr_.7fr]">
         <section class="rounded-2xl border bg-white p-4 shadow-sm">
-          <div class="mb-4 flex items-center justify-between"><div><h2 class="font-black">演讲顺序</h2><p class="text-xs text-slate-500">拖动时间、状态或发言人即可更新后台准备内容。</p></div><Button size="sm" on:click={addSession}>新增场次</Button></div>
+          <div class="mb-4 flex items-center justify-between"><div><h2 class="font-black">演讲顺序</h2><p class="text-xs text-slate-500">调整场次的会场归属时，未确认条目跟到新会场，已上屏段落留在原会场。</p></div><Button size="sm" on:click={addSession}>新增场次</Button></div>
           <div class="space-y-3">
             {#each $desk.sessions.sort((a,b) => a.order - b.order) as session}
-              <article class="grid gap-3 rounded-xl border p-3 md:grid-cols-[80px_1fr_190px_120px]">
+              <article class="grid gap-3 rounded-xl border p-3 md:grid-cols-[80px_1fr_130px_170px_110px]">
                 <input class="focus-ring rounded-lg border px-2 py-2 text-sm font-bold" type="time" value={session.time} on:change={event => updateSession(session.id, { time: (event.target as HTMLInputElement).value })} />
-                <div><input class="focus-ring w-full rounded-lg border px-3 py-2 font-bold" value={session.title} on:change={event => updateSession(session.id, { title: (event.target as HTMLInputElement).value })} /><span class="mt-1 block text-[10px] text-slate-500">{session.room}</span></div>
+                <div><input class="focus-ring w-full rounded-lg border px-3 py-2 font-bold" value={session.title} on:change={event => updateSession(session.id, { title: (event.target as HTMLInputElement).value })} /><span class="mt-1 block text-[10px] text-slate-500">第 {session.order} 场</span></div>
+                <select class="focus-ring rounded-lg border px-2" aria-label="会场归属" value={session.venueId} on:change={event => changeSessionVenue(session, (event.target as HTMLSelectElement).value)}>{#each venues as venue}<option value={venue.id}>{venue.name}</option>{/each}</select>
                 <select class="focus-ring rounded-lg border px-2" value={session.speakerId} on:change={event => updateSession(session.id, { speakerId: (event.target as HTMLSelectElement).value })}>{#each $desk.speakers as speaker}<option value={speaker.id}>{speaker.name}</option>{/each}</select>
                 <select class="focus-ring rounded-lg border px-2" value={session.status} on:change={event => updateSession(session.id, { status: (event.target as HTMLSelectElement).value as Session['status'] })}><option value="upcoming">未开始</option><option value="live">进行中</option><option value="done">已结束</option></select>
               </article>
@@ -319,7 +389,7 @@
     {/if}
 
     {#if tab === 'terms'}
-      <div class="mb-5"><p class="text-[10px] font-black uppercase tracking-[.18em] text-teal-700">后台内容与现场动作</p><h1 class="mt-1 text-3xl font-black">术语表、紧急通知与发布闸门</h1></div>
+      <div class="mb-5"><p class="text-[10px] font-black uppercase tracking-[.18em] text-teal-700">主控台 · 术语表与发布闸门</p><h1 class="mt-1 text-3xl font-black">术语表、紧急通知与发布闸门</h1></div>
       <div class="grid gap-4 xl:grid-cols-[1.35fr_.65fr]">
         <section class="overflow-hidden rounded-2xl border bg-white shadow-sm">
           <div class="flex items-center justify-between border-b p-4"><div><h2 class="font-black">术语表</h2><p class="text-xs text-slate-500">“发送提醒”只影响当前口译位，不发布到现场。</p></div><Button size="sm" on:click={addTerm}>新增术语</Button></div>
@@ -356,12 +426,12 @@
           <label class="text-xs font-bold">发言人或场次<select class="focus-ring mt-2 w-full rounded-xl border p-3" bind:value={manualSpeakerId}><option value="">跟随当前发言人</option>{#each $desk.speakers as speaker}<option value={speaker.id}>{speaker.name}</option>{/each}</select></label>
           <label class="mt-4 block text-xs font-bold">现场文字<textarea bind:this={manualInput} class="focus-ring mt-2 w-full rounded-xl border p-4 text-base leading-7" rows="8" bind:value={manualText} placeholder="网络中断时，在这里继续录入…" on:keydown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') submitManual() }}></textarea></label>
           <Button class="mt-3 w-full" size="lg" disabled={!manualText.trim()} on:click={submitManual}>加入队列</Button>
-          <div class="mt-4 rounded-xl bg-amber-50 p-3 text-xs text-amber-900"><strong>暂存规则：</strong>离线条目会带“本地”标记；恢复连接后自动与本机队列合并，并执行相似内容检测。</div>
+          <div class="mt-4 rounded-xl bg-amber-50 p-3 text-xs text-amber-900"><strong>暂存规则：</strong>离线条目归属当前值守会场（{venueName($desk.currentVenueId)}）并带“本地”标记；恢复连接后自动与本机队列合并，并执行相似内容检测。</div>
         </section>
         <section class="rounded-2xl border bg-white p-5 shadow-sm">
-          <div class="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 class="font-black">合并与冲突检查</h2><p class="text-xs text-slate-500">当前有 {offlineCount} 条离线条目，{duplicateCount} 条疑似重复。</p></div><Button disabled={$desk.online || !offlineCount} color="green" on:click={mergeOffline}>恢复连接并合并</Button></div>
+          <div class="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 class="font-black">合并与冲突检查</h2><p class="text-xs text-slate-500">{venueName($desk.currentVenueId)}当前有 {offlineCount} 条离线条目，{duplicateCount} 条疑似重复。</p></div><Button disabled={$desk.online || !offlineCount} color="green" on:click={mergeOffline}>恢复连接并合并</Button></div>
           <div class="space-y-3">
-            {#each $desk.cues.filter(item => item.offline) as cue}
+            {#each venueCues.filter(item => item.offline) as cue}
               <article class="rounded-xl border border-dashed border-amber-300 bg-amber-50/60 p-4">
                 <div class="flex items-center justify-between text-[10px] font-bold text-amber-800"><span>本机暂存 · {formatTime(cue.receivedAt)}</span><span>{speakerName($desk, cue.speakerId)}</span></div>
                 <textarea class="focus-ring mt-3 w-full rounded-xl border border-amber-200 bg-white p-3 text-sm" rows="3" value={cue.text} on:change={event => updateCue(cue.id, { text: (event.target as HTMLTextAreaElement).value })}></textarea>
@@ -375,7 +445,7 @@
     {/if}
   </main>
 
-  <footer class="mx-auto flex max-w-[1800px] flex-wrap items-center justify-between gap-3 px-4 pb-6 text-[11px] text-slate-500 lg:px-6"><span>本机自动保存 · 最近更新 {new Date($desk.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}</span><span>后台准备内容与现场可见内容严格分离</span><div class="flex gap-2"><button class="font-bold underline disabled:opacity-40" disabled={!canUndo()} on:click={undoDesk}>撤销</button><button class="font-bold underline disabled:opacity-40" disabled={!canRedo()} on:click={redoDesk}>重做</button></div></footer>
+  <footer class="mx-auto flex max-w-[1800px] flex-wrap items-center justify-between gap-3 px-4 pb-6 text-[11px] text-slate-500 lg:px-6"><span>本机自动保存 · 最近更新 {new Date($desk.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })}</span><span>各会场队列与上屏相互独立 · 主控仅维护议程与术语表</span><div class="flex gap-2"><button class="font-bold underline disabled:opacity-40" disabled={!canUndo()} on:click={undoDesk}>撤销</button><button class="font-bold underline disabled:opacity-40" disabled={!canRedo()} on:click={redoDesk}>重做</button></div></footer>
 </div>
 
 {#if showHelp}
